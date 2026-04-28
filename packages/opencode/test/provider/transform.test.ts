@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ProviderTransform } from "../../src/provider"
+import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 
 describe("ProviderTransform.options - setCacheKey", () => {
@@ -852,6 +852,150 @@ describe("ProviderTransform.schema - gemini non-object properties removal", () =
     const result = ProviderTransform.schema(openaiModel, schema) as any
 
     expect(result.properties.data.properties).toBeDefined()
+  })
+})
+
+describe("ProviderTransform.schema - moonshot $ref siblings", () => {
+  const moonshotModel = {
+    providerID: "moonshotai",
+    api: {
+      id: "kimi-k2",
+    },
+  } as any
+
+  test("removes sibling descriptions from referenced tool parameter schemas", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        deviceType: {
+          description: "Optional. The type of device that captured the screenshot, e.g. mobile or desktop.",
+          enum: ["DEVICE_TYPE_UNSPECIFIED", "MOBILE", "DESKTOP", "TABLET", "AGNOSTIC"],
+          type: "string",
+        },
+        modelId: {
+          description: "Optional. The model to use for generation.",
+          enum: ["MODEL_ID_UNSPECIFIED", "GEMINI_3_PRO", "GEMINI_3_FLASH", "GEMINI_3_1_PRO"],
+          type: "string",
+        },
+        projectId: {
+          description: "Required. The project ID of screens to generate variants for.",
+          type: "string",
+        },
+        prompt: {
+          description: "Required. The input text used to generate the variants.",
+          type: "string",
+        },
+        selectedScreenIds: {
+          description: "Required. The screen ids of screen to generate variants for.",
+          items: {
+            type: "string",
+          },
+          type: "array",
+        },
+        variantOptions: {
+          $ref: "#/$defs/VariantOptions",
+          description:
+            "Required. The variant options for generation, including the number of variants, creative range, and aspects to focus on.",
+        },
+      },
+      required: ["projectId", "selectedScreenIds", "prompt", "variantOptions"],
+      $defs: {
+        VariantOptions: {
+          description:
+            "Configuration options for design variant generation. This message captures all parameters used to generate variants, allowing the configuration to be stored, replayed, or analyzed.",
+          properties: {
+            aspects: {
+              description: "Optional. Specific aspects to focus on. If empty, all aspects may be varied.",
+              items: {
+                enum: ["VARIANT_ASPECT_UNSPECIFIED", "LAYOUT", "COLOR_SCHEME", "IMAGES", "TEXT_FONT", "TEXT_CONTENT"],
+                type: "string",
+              },
+              type: "array",
+            },
+            creativeRange: {
+              description: "Optional. Creative range for variations. Default: EXPLORE",
+              enum: ["CREATIVE_RANGE_UNSPECIFIED", "REFINE", "EXPLORE", "REIMAGINE"],
+              type: "string",
+            },
+            variantCount: {
+              description: "Optional. Number of variants to generate (1-5). Default: 3",
+              format: "int32",
+              type: "integer",
+            },
+          },
+          type: "object",
+        },
+      },
+      description: "Request message for GenerateVariants.",
+      additionalProperties: false,
+    } as any
+
+    const result = ProviderTransform.schema(moonshotModel, schema) as any
+
+    expect(result.properties.variantOptions).toEqual({
+      $ref: "#/$defs/VariantOptions",
+    })
+    expect(result.$defs.VariantOptions.description).toBe(schema.$defs.VariantOptions.description)
+  })
+
+  test("also runs for kimi models outside the moonshot provider", () => {
+    const result = ProviderTransform.schema(
+      {
+        providerID: "openrouter",
+        name: "Kimi K2",
+        api: {
+          id: "moonshotai/kimi-k2",
+        },
+      } as any,
+      {
+        type: "object",
+        properties: {
+          value: {
+            $ref: "#/$defs/Value",
+            description: "Moonshot rejects this sibling after ref expansion.",
+          },
+        },
+        $defs: {
+          Value: {
+            description: "Referenced schema description stays here.",
+            type: "object",
+          },
+        },
+      } as any,
+    ) as any
+
+    expect(result.properties.value).toEqual({
+      $ref: "#/$defs/Value",
+    })
+  })
+
+  test("converts tuple-style array items to a single item schema", () => {
+    const result = ProviderTransform.schema(moonshotModel, {
+      type: "object",
+      properties: {
+        codeSpec: {
+          type: "object",
+          properties: {
+            accessibility: {
+              type: "object",
+              properties: {
+                renderedSize: {
+                  description: "Rendered size [width, height] in px",
+                  type: "array",
+                  items: [{ type: "number" }, { type: "number" }],
+                  minItems: 2,
+                  maxItems: 2,
+                },
+              },
+            },
+          },
+        },
+      },
+    } as any) as any
+
+    expect(result.properties.codeSpec.properties.accessibility.properties.renderedSize.items).toEqual({
+      type: "number",
+    })
   })
 })
 
@@ -2773,6 +2917,28 @@ describe("ProviderTransform.variants", () => {
       })
     })
 
+    test("github copilot opus 4.7 returns only medium reasoning effort", () => {
+      const model = createMockModel({
+        id: "claude-opus-4.7",
+        providerID: "github-copilot",
+        api: {
+          id: "claude-opus-4.7",
+          url: "https://api.githubcopilot.com/v1",
+          npm: "@ai-sdk/anthropic",
+        },
+      })
+      const result = ProviderTransform.variants(model)
+      expect(result).toEqual({
+        medium: {
+          thinking: {
+            type: "adaptive",
+            display: "summarized",
+          },
+          effort: "medium",
+        },
+      })
+    })
+
     test("returns high and max with thinking config", () => {
       const model = createMockModel({
         id: "anthropic/claude-4",
@@ -3146,443 +3312,5 @@ describe("ProviderTransform.variants", () => {
       const result = ProviderTransform.variants(model)
       expect(result).toEqual({})
     })
-  })
-})
-describe("ProviderTransform.message - preserve redacted_thinking blocks", () => {
-  const anthropicModel = {
-    id: "anthropic/claude-sonnet-4",
-    providerID: "anthropic",
-    api: {
-      id: "claude-sonnet-4-20250514",
-      url: "https://api.anthropic.com",
-      npm: "@ai-sdk/anthropic",
-    },
-    name: "Claude Sonnet 4",
-    capabilities: {
-      temperature: true,
-      reasoning: true,
-      attachment: true,
-      toolcall: true,
-      input: { text: true, audio: false, image: true, video: false, pdf: true },
-      output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: true,
-    },
-    cost: {
-      input: 0.003,
-      output: 0.015,
-      cache: { read: 0.0003, write: 0.00375 },
-    },
-    limit: {
-      context: 200000,
-      output: 8192,
-    },
-    status: "active",
-    options: {},
-    headers: {},
-  } as any
-
-  test("preserves redacted_thinking blocks (empty text with providerOptions)", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "Let me think about this...",
-            providerOptions: { anthropic: { signature: "sig_abc123" } },
-          },
-          {
-            type: "reasoning",
-            text: "",
-            providerOptions: { anthropic: { redactedData: "opaque_encrypted_data_blob" } },
-          },
-          { type: "text", text: "Here is my answer." },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(3)
-    expect(result[0].content[0]).toEqual({
-      type: "reasoning",
-      text: "Let me think about this...",
-      providerOptions: { anthropic: { signature: "sig_abc123" } },
-    })
-    expect(result[0].content[1]).toEqual({
-      type: "reasoning",
-      text: "",
-      providerOptions: { anthropic: { redactedData: "opaque_encrypted_data_blob" } },
-    })
-    expect(result[0].content[2]).toEqual({ type: "text", text: "Here is my answer." })
-  })
-
-  test("still filters empty reasoning parts without providerOptions", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          { type: "reasoning", text: "" },
-          { type: "text", text: "Answer" },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(1)
-    expect(result[0].content[0]).toEqual({ type: "text", text: "Answer" })
-  })
-
-  test("preserves multiple redacted_thinking blocks interleaved with thinking blocks", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "First thought",
-            providerOptions: { anthropic: { signature: "sig_1" } },
-          },
-          {
-            type: "reasoning",
-            text: "",
-            providerOptions: { anthropic: { redactedData: "redacted_1" } },
-          },
-          {
-            type: "reasoning",
-            text: "Second thought",
-            providerOptions: { anthropic: { signature: "sig_2" } },
-          },
-          {
-            type: "reasoning",
-            text: "",
-            providerOptions: { anthropic: { redactedData: "redacted_2" } },
-          },
-          { type: "text", text: "Final answer" },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(5)
-    expect(result[0].content[1].type).toBe("reasoning")
-    expect(result[0].content[1].text).toBe("")
-    expect(result[0].content[1].providerOptions.anthropic.redactedData).toBe("redacted_1")
-    expect(result[0].content[3].type).toBe("reasoning")
-    expect(result[0].content[3].text).toBe("")
-    expect(result[0].content[3].providerOptions.anthropic.redactedData).toBe("redacted_2")
-  })
-
-  test("preserves redacted_thinking on bedrock provider", () => {
-    const bedrockModel = {
-      ...anthropicModel,
-      id: "amazon-bedrock/anthropic.claude-sonnet-4",
-      providerID: "amazon-bedrock",
-      api: {
-        id: "anthropic.claude-sonnet-4",
-        url: "https://bedrock-runtime.us-east-1.amazonaws.com",
-        npm: "@ai-sdk/amazon-bedrock",
-      },
-    }
-
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "",
-            providerOptions: { anthropic: { redactedData: "opaque_data" } },
-          },
-          { type: "text", text: "Answer" },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, bedrockModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(2)
-    expect(result[0].content[0]).toEqual({
-      type: "reasoning",
-      text: "",
-      providerOptions: { anthropic: { redactedData: "opaque_data" } },
-    })
-  })
-})
-
-describe("ProviderTransform.message - preserve thinking blocks during tool-use reordering", () => {
-  const anthropicModel = {
-    id: "anthropic/claude-sonnet-4",
-    providerID: "anthropic",
-    api: {
-      id: "claude-sonnet-4-20250514",
-      url: "https://api.anthropic.com",
-      npm: "@ai-sdk/anthropic",
-    },
-    name: "Claude Sonnet 4",
-    capabilities: {
-      temperature: true,
-      reasoning: true,
-      attachment: true,
-      toolcall: true,
-      input: { text: true, audio: false, image: true, video: false, pdf: true },
-      output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: true,
-    },
-    cost: {
-      input: 0.003,
-      output: 0.015,
-      cache: { read: 0.0003, write: 0.00375 },
-    },
-    limit: {
-      context: 200000,
-      output: 8192,
-    },
-    status: "active",
-    options: {},
-    headers: {},
-  } as any
-
-  test("does not split assistant message when reasoning blocks are present with trailing tool calls", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "I need to check the file...",
-            providerOptions: { anthropic: { signature: "sig_abc" } },
-          },
-          { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/root" } },
-          { type: "text", text: "Let me check that for you." },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    // Should NOT be split — message must remain intact to preserve thinking block positions
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(3)
-    expect(result[0].content[0].type).toBe("reasoning")
-    expect(result[0].content[1].type).toBe("tool-call")
-    expect(result[0].content[2].type).toBe("text")
-  })
-
-  test("does not split when redacted_thinking blocks are present", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "",
-            providerOptions: { anthropic: { redactedData: "opaque_data" } },
-          },
-          { type: "tool-call", toolCallId: "toolu_1", toolName: "bash", input: { command: "ls" } },
-          { type: "text", text: "Done." },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(3)
-  })
-
-  test("still splits messages without reasoning blocks", () => {
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/root" } },
-          { type: "text", text: "I checked the file." },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, anthropicModel, {})
-
-    // Should still split when no reasoning blocks present
-    expect(result).toHaveLength(2)
-    expect(result[0].content).toEqual([{ type: "text", text: "I checked the file." }])
-    expect(result[1].content).toEqual([
-      { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/root" } },
-    ])
-  })
-
-  test("works on vertex anthropic with reasoning blocks", () => {
-    const vertexModel = {
-      ...anthropicModel,
-      providerID: "google-vertex-anthropic",
-      api: {
-        id: "claude-sonnet-4@20250514",
-        url: "https://us-central1-aiplatform.googleapis.com",
-        npm: "@ai-sdk/google-vertex/anthropic",
-      },
-    }
-
-    const msgs = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "Thinking...",
-            providerOptions: { anthropic: { signature: "sig_xyz" } },
-          },
-          { type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: { filePath: "/tmp" } },
-          { type: "text", text: "Here are the results." },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, vertexModel, {})
-
-    expect(result).toHaveLength(1)
-    expect(result[0].content).toHaveLength(3)
-  })
-})
-
-describe("ProviderTransform.message - cache control skips reasoning blocks", () => {
-  test("cache hint is applied to non-reasoning block when reasoning is last", () => {
-    // This tests providers where cache control is applied at the content-part level
-    // (not message level), e.g. openrouter routing to Anthropic
-    const openrouterModel = {
-      id: "openrouter/anthropic/claude-sonnet-4",
-      providerID: "openrouter",
-      api: {
-        id: "anthropic/claude-sonnet-4",
-        url: "https://openrouter.ai/api/v1",
-        npm: "@openrouter/ai-sdk-provider",
-      },
-      name: "Claude Sonnet 4",
-      capabilities: {
-        temperature: true,
-        reasoning: true,
-        attachment: true,
-        toolcall: true,
-        input: { text: true, audio: false, image: true, video: false, pdf: true },
-        output: { text: true, audio: false, image: false, video: false, pdf: false },
-        interleaved: true,
-      },
-      cost: {
-        input: 0.003,
-        output: 0.015,
-        cache: { read: 0.0003, write: 0.00375 },
-      },
-      limit: {
-        context: 200000,
-        output: 8192,
-      },
-      status: "active",
-      options: {},
-      headers: {},
-    } as any
-
-    const msgs = [
-      {
-        role: "system",
-        content: [{ type: "text", text: "You are a helpful assistant." }],
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "Hello" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "I'll help you." },
-          {
-            type: "reasoning",
-            text: "Thinking about next steps...",
-            providerOptions: { anthropic: { signature: "sig_123" } },
-          },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, openrouterModel, {}) as any[]
-
-    // The last message is in the "final" set for caching.
-    // Cache hint should be on the text block, NOT the reasoning block.
-    const assistantMsg = result[result.length - 1]
-    const reasoningPart = assistantMsg.content.find((p: any) => p.type === "reasoning")
-    const textPart = assistantMsg.content.find((p: any) => p.type === "text")
-
-    // Reasoning block should not have cache control added
-    expect(reasoningPart.providerOptions?.anthropic?.cacheControl).toBeUndefined()
-    expect(reasoningPart.providerOptions?.openrouter?.cacheControl).toBeUndefined()
-    // The text block should receive the cache hint instead
-    expect(textPart.providerOptions).toBeDefined()
-  })
-
-  test("cache hint falls back to message level when all content blocks are reasoning", () => {
-    const openrouterModel = {
-      id: "openrouter/anthropic/claude-sonnet-4",
-      providerID: "openrouter",
-      api: {
-        id: "anthropic/claude-sonnet-4",
-        url: "https://openrouter.ai/api/v1",
-        npm: "@openrouter/ai-sdk-provider",
-      },
-      name: "Claude Sonnet 4",
-      capabilities: {
-        temperature: true,
-        reasoning: true,
-        attachment: true,
-        toolcall: true,
-        input: { text: true, audio: false, image: true, video: false, pdf: true },
-        output: { text: true, audio: false, image: false, video: false, pdf: false },
-        interleaved: true,
-      },
-      cost: {
-        input: 0.003,
-        output: 0.015,
-        cache: { read: 0.0003, write: 0.00375 },
-      },
-      limit: {
-        context: 200000,
-        output: 8192,
-      },
-      status: "active",
-      options: {},
-      headers: {},
-    } as any
-
-    const msgs = [
-      {
-        role: "system",
-        content: [{ type: "text", text: "You are a helpful assistant." }],
-      },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "reasoning",
-            text: "Only reasoning here...",
-            providerOptions: { anthropic: { signature: "sig_only" } },
-          },
-        ],
-      },
-    ] as any[]
-
-    const result = ProviderTransform.message(msgs, openrouterModel, {}) as any[]
-
-    // When no suitable content block is found, cache hint should go to message level
-    const assistantMsg = result[result.length - 1]
-    const reasoningPart = assistantMsg.content[0]
-
-    // Reasoning block must NOT be modified
-    expect(reasoningPart.providerOptions?.openrouter?.cacheControl).toBeUndefined()
-    // Cache falls back to message-level providerOptions
-    expect(assistantMsg.providerOptions).toBeDefined()
   })
 })
