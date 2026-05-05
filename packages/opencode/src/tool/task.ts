@@ -73,7 +73,7 @@ export const TaskTool = Tool.define(
           title: params.description + ` (@${next.name} subagent)`,
           permission: [
             ...(parent.permission ?? []).filter(
-              (rule) => rule.permission === "external_directory" || rule.action === "deny",
+              (rule) => rule.permission === "external_directory" || rule.action === "deny" || rule.action === "allow",
             ),
             ...(canTodo
               ? []

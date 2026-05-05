@@ -8,6 +8,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import type { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
+import { Permission } from "../../src/permission"
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
@@ -42,9 +43,17 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (
+  opts: {
+    title?: string
+    permission?: Permission.Ruleset
+  } = {},
+) {
   const session = yield* Session.Service
-  const chat = yield* session.create({ title })
+  const chat = yield* session.create({
+    title: opts.title ?? "Pinned",
+    permission: opts.permission,
+  })
   const user = yield* session.updateMessage({
     id: MessageID.ascending(),
     role: "user",
@@ -428,6 +437,346 @@ describe("tool.task", () => {
         },
         experimental: {
           primary_tools: ["bash", "read"],
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute propagates parent allow rules to child sessions",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed({
+          permission: [{ permission: "bash", pattern: "*", action: "allow" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "bash",
+            pattern: "*",
+            action: "allow",
+          },
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute propagates parent deny rules to child sessions",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed({
+          permission: [{ permission: "edit", pattern: "*", action: "deny" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "edit",
+            pattern: "*",
+            action: "deny",
+          },
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute propagates parent external_directory rules regardless of action",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed({
+          permission: [{ permission: "external_directory", pattern: "/tmp/foo", action: "ask" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "external_directory",
+            pattern: "/tmp/foo",
+            action: "ask",
+          },
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute drops non-external_directory ask rules from child sessions",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed({
+          permission: [{ permission: "bash", pattern: "*", action: "ask" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute keeps child hardcoded denies after propagated parent allows",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed({
+          permission: [{ permission: "todowrite", pattern: "*", action: "allow" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "allow",
+          },
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+        expect(Permission.evaluate("todowrite", "*", child.permission ?? []).action).toBe("deny")
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute propagates runtime-patched parent permissions to new child sessions",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        yield* sessions.setPermission({
+          sessionID: chat.id,
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.permission).toEqual([
+          {
+            permission: "*",
+            pattern: "*",
+            action: "allow",
+          },
+          {
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+        ])
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
         },
       },
     },
